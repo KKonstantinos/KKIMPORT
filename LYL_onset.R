@@ -1,295 +1,326 @@
-
 calculate_LYL_onset <- function(
+    Disease = "HF",
     index_age = 18,
-    Disease = "MI",
+    cutoffs = c(45, 55, 65, 75, 85),
+    tau = 95,
+    Niter = 1000,
     DO_OVERALL = TRUE,
     DO_MALE = TRUE,
     DO_FEMALE = TRUE,
-    Niter = 20,
-    cutoffs = c(45, 55, 65, 75, 85),
-    tau = 95,
-    output_dir = "/safe/data/APNC/SCARP-lifecourse/Data/Derived/ltr/45/Diagnoses/plot_data"
+
+    # Must be TRUE only if Life_exp is restricted
+    # remaining life expectancy up to age 95.
+    life_exp_restricted_to_tau = FALSE,
+
+    disease_dir =
+      "/safe/data/APNC/DATA/ANALYSIS DATA",
+
+    lifetable_file =
+      "/safe/data/APNC/SCARP-lifecourse/Data/Derived/Lifetables_per_year.csv",
+
+    death_file =
+      "/safe/data/SCARP/DATA_2024/PARQUET/ut_r_dors_19328_2023.parquet",
+
+    death_avi_file =
+      "/safe/data/SCARP/DATA_2024/PARQUET/ut_r_dors_avi_19328_2023.parquet",
+
+    migration_file =
+      "/safe/data/SCARP/DATA_2024/PARQUET/ar_lev_migrationer.parquet",
+
+    output_dir =
+      "/safe/data/APNC/SCARP-lifecourse/Data/Derived/ltr/45/Diagnoses/plot_data",
+
+    admin_end = as.Date("2024-01-01")
 ) {
 
+  # ==================================================
+  # 1. PACKAGES
+  # ==================================================
+
   library(dplyr)
-  library(arrow)
-  library(readr)
   library(tidyr)
   library(purrr)
+  library(arrow)
+  library(readr)
+  library(lill)
 
-  message("Loading data for ", Disease)
+  message("Starting analysis: ", Disease)
 
-  # --------------------------------------------------
-  # 1. LOAD DISEASE DATA
-  # --------------------------------------------------
+  if (!life_exp_restricted_to_tau) {
+    stop(
+      "The life-table variable Life_exp must represent ",
+      "remaining life expectancy restricted to age ", tau,
+      ". Ordinary remaining life expectancy cannot be ",
+      "used in tau - age - Life_exp. ",
+      "Verify or reconstruct the reference measure first."
+    )
+  }
 
-  data_name <- paste0(Disease, "_Data")
+  if (tau != 95) {
+    stop(
+      "This function currently assumes life-table ",
+      "expectancy is restricted to age 95."
+    )
+  }
 
-  if (!exists(data_name, envir = .GlobalEnv)) {
+  # ==================================================
+  # 2. LOAD DISEASE DATA
+  # ==================================================
 
-    file_path <- paste0(
-      "/safe/data/APNC/DATA/ANALYSIS DATA/ICD_",
-      paste(Disease, "all_unique", "2", "1987", "2024",
-            sep = "_"),
-      ".parquet"
+  disease_file <- file.path(
+    disease_dir,
+    paste0(
+      "ICD_",
+      Disease,
+      "_all_unique_2_1987_2024.parquet"
+    )
+  )
+
+  disease_data <- arrow::read_parquet(
+    disease_file
+  ) %>%
+    filter(
+      AR >= 1990,
+      !is.na(lopnr),
+      !is.na(alder)
+    ) %>%
+    mutate(
+      alder = as.numeric(alder),
+      B_Year = as.numeric(B_Year),
+      Kon = as.integer(Kon),
+      Diagnosis_year = as.integer(AR)
     )
 
-    disease_data <- arrow::read_parquet(file_path) %>%
-      group_by(AR) %>%
-      filter(AR >= 1990) %>%
-      ungroup() %>%
-      distinct()
-
-    assign(data_name, disease_data, envir = .GlobalEnv)
-
-  } else {
-    disease_data <- get(data_name, envir = .GlobalEnv)
-  }
-
-  # --------------------------------------------------
-  # 2. LOAD LIFE TABLES
-  # --------------------------------------------------
-
-  Lifetables <- read.csv(
-    "/safe/data/APNC/SCARP-lifecourse/Data/Derived/Lifetables_per_year.csv"
-  )[, -1]
-
-  Columns <- Lifetables %>%
-    colnames() %>%
-    .[c(2:34)]
-
-  # Preserve your original life-table method
-  # but retain the age-specific reference values.
-
-  Total <- disease_data %>%
-    distinct(lopnr) %>%
-    nrow()
-
-  Weights_for_lifetables <- disease_data %>%
-    count(AR) %>%
-    mutate(
-      Total = Total,
-      Weights = n / Total
-    )
-
-  Life_exp <- Lifetables %>%
-    select(-c(Gender, age)) %>%
-    rowwise() %>%
-    mutate(
-      weighted_Life_exp = weighted.mean(
-        c_across(X1990:X2022),
-        Weights_for_lifetables$Weights,
-        na.rm = TRUE
-      )
-    ) %>%
-    ungroup() %>%
-    select(weighted_Life_exp)
-
-  Control_life_exp <- Lifetables %>%
-    select(Gender, age) %>%
-    bind_cols(Life_exp) %>%
-    mutate(
-      LYL = 95 - age - weighted_Life_exp
-    )
-
-  # --------------------------------------------------
-  # 3. LOAD DEATH DATA
-  # --------------------------------------------------
-
-  if (!exists("TPR", envir = .GlobalEnv)) {
-
-    TPR <- arrow::open_dataset(
-      "/safe/data/SCARP/DATA_2024/PARQUET/ar_lev_grunduppgifter.parquet"
-    ) %>%
-      collect()
-
-    assign("TPR", TPR, envir = .GlobalEnv)
-
-  } else {
-    TPR <- get("TPR", envir = .GlobalEnv)
-  }
-
-  if (!exists("CDR", envir = .GlobalEnv)) {
-
-    CDR <- arrow::open_dataset(
-      "/safe/data/SCARP/DATA_2024/PARQUET/ut_r_dors_19328_2023.parquet"
-    ) %>%
-      collect() %>%
-      mutate(
-        Death_Year = as.numeric(substr(DODSDAT, 1, 4)),
-        Death_dt = as.yearmon(DODSDAT, "%Y%m")
-      ) %>%
-      select(LopNr, Death_Year, Death_dt) %>%
-      rename(lopnr = LopNr)
-
-    assign("CDR", CDR, envir = .GlobalEnv)
-
-  } else {
-    CDR <- get("CDR", envir = .GlobalEnv)
-  }
-
-  if (!exists("CDR_avi", envir = .GlobalEnv)) {
-
-    CDR_avi <- arrow::open_dataset(
-      "/safe/data/SCARP/DATA_2024/PARQUET/ut_r_dors_avi_19328_2023.parquet"
-    ) %>%
-      collect() %>%
-      mutate(
-        Death_Year = as.numeric(substr(DODSDAT, 1, 4)),
-        Death_dt = as.yearmon(DODSDAT, "%Y%m")
-      ) %>%
-      select(LopNr, Death_Year, Death_dt) %>%
-      rename(lopnr = LopNr) %>%
-      anti_join(CDR, by = "lopnr")
-
-    assign("CDR_avi", CDR_avi, envir = .GlobalEnv)
-
-  } else {
-    CDR_avi <- get("CDR_avi", envir = .GlobalEnv)
-  }
-
-  CDR <- bind_rows(CDR, CDR_avi) %>%
+  # Keep first recorded disease diagnosis
+  disease_data <- disease_data %>%
+    arrange(lopnr, Diagnosis_year, alder) %>%
     distinct(lopnr, .keep_all = TRUE)
 
-  gc()
+  message(
+    "Unique disease cases: ",
+    nrow(disease_data)
+  )
 
-  # --------------------------------------------------
-  # 4. LOAD IMMIGRATION DATA
-  # --------------------------------------------------
+  # ==================================================
+  # 3. LOAD AND PREPARE LIFE TABLES
+  # ==================================================
 
-  if (!exists("imig", envir = .GlobalEnv)) {
+  Lifetables <- read.csv(
+    lifetable_file,
+    check.names = TRUE
+  )
 
-    imig <- arrow::open_dataset(
-      "/safe/data/SCARP/DATA_2024/PARQUET/ar_lev_migrationer.parquet"
+  # Remove an optional index column only when present
+  Lifetables <- Lifetables %>%
+    select(
+      -any_of(c("X", "X.1", "...1"))
+    )
+
+  Lifetables_long <- Lifetables %>%
+    pivot_longer(
+      cols = matches("^X[0-9]{4}$"),
+      names_to = "Year",
+      values_to = "Life_exp"
     ) %>%
-      collect() %>%
-      filter(posttyp == "Utv") %>%
-      mutate(
-        imig_Dates = as.Date(datum, "%Y%m%d"),
-        imig_Yr = year(imig_Dates)
-      ) %>%
-      select(lopnr, imig_Dates, imig_Yr) %>%
-      group_by(lopnr) %>%
-      slice_min(imig_Dates, with_ties = FALSE) %>%
-      ungroup() %>%
-      left_join(TPR, by = "lopnr") %>%
-      mutate(
-        Age_1990 = 1990 - as.numeric(Fodelsear),
-        imig_age = imig_Yr - as.numeric(Fodelsear),
-        imig_entry_age = imig_age,
-        imigated = TRUE,
-        older_than_index_age = Age_1990 > index_age
-      )
+    mutate(
+      Year = as.integer(
+        sub("^X", "", Year)
+      ),
+      age = as.numeric(age),
+      Gender = as.integer(Gender),
+      Life_exp = as.numeric(Life_exp)
+    ) %>%
+    select(
+      Gender,
+      age,
+      Year,
+      Life_exp
+    )
 
-    assign("imig", imig, envir = .GlobalEnv)
-
-  } else {
-    imig <- get("imig", envir = .GlobalEnv)
+  if (anyDuplicated(
+    Lifetables_long[c("Gender", "age", "Year")]
+  ) > 0) {
+    stop(
+      "Life tables contain duplicate ",
+      "sex-age-year combinations."
+    )
   }
 
-  # --------------------------------------------------
-  # 5. PREPARE CASES
-  # --------------------------------------------------
+  message("Life tables loaded.")
 
-  cases <- disease_data %>%
-    left_join(CDR, by = "lopnr") %>%
-    filter(alder >= index_age) %>%
-    mutate(
-      ev_Death = if_else(
-        Doddattum == "" | alder >= 95,
-        0L, 1L
-      ),
-      group = Disease,
-      Death_Age = if_else(
-        Doddattum == "",
-        pmin(2024 - B_Year, 95),
-        pmin(Death_Year - B_Year, 95)
-      ),
-      Death_dt = as.Date(
-        pmin(Death_dt, as.yearmon("2024-01")),
-        frac = 0
-      ),
-      EOS_date = as.Date("2024-01-01")
-    ) %>%
-    select(
-      lopnr, alder, group, INDATUM, UTDATUM,
-      EOS_date, Death_dt, B_Year, Kon
-    ) %>%
-    distinct()
+  # ==================================================
+  # 4. LOAD DEATH DATA
+  # ==================================================
 
-  duplicated_lopnrs <- cases %>%
-    count(lopnr) %>%
-    filter(n > 1) %>%
-    pull(lopnr)
+  read_deaths <- function(path) {
 
-  cases <- cases %>%
-    filter(!lopnr %in% duplicated_lopnrs)
+    arrow::read_parquet(path) %>%
+      transmute(
+        lopnr = LopNr,
+        Death_date = as.Date(
+          as.character(DODSDAT),
+          format = "%Y%m%d"
+        )
+      ) %>%
+      filter(!is.na(Death_date))
+  }
 
-  # --------------------------------------------------
-  # 6. PREPARE FOLLOW-UP
-  # --------------------------------------------------
+  CDR <- bind_rows(
+    read_deaths(death_file),
+    read_deaths(death_avi_file)
+  ) %>%
+    group_by(lopnr) %>%
+    summarise(
+      Death_date = min(Death_date),
+      .groups = "drop"
+    )
 
-  temp <- cases %>%
-    select(
-      lopnr, alder, B_Year, INDATUM, UTDATUM,
-      EOS_date, Death_dt, Kon
-    ) %>%
-    left_join(
-      imig %>%
-        select(lopnr, imig_Dates, imig_Yr),
-      by = "lopnr"
-    ) %>%
-    mutate(
-      imig_Dates = if_else(
-        is.na(imig_Dates),
-        EOS_date,
-        imig_Dates
-      ),
-      imig_Dates = if_else(
-        imig_Dates != INDATUM,
-        imig_Dates,
-        EOS_date
-      ),
-      Time_Death = as.numeric(
-        pmin(Death_dt, imig_Dates, na.rm = TRUE) -
-          INDATUM + 1
-      ),
-      ev_Death = if_else(
-        is.na(Death_dt), "NO", "YES"
+  message("Death data loaded.")
+
+  # ==================================================
+  # 5. LOAD EMIGRATION DATA
+  # ==================================================
+
+  migration_data <- arrow::read_parquet(
+    migration_file
+  ) %>%
+    filter(posttyp == "Utv") %>%
+    transmute(
+      lopnr,
+      Emigration_date = as.Date(
+        as.character(datum),
+        format = "%Y%m%d"
       )
     ) %>%
-    filter(Time_Death > 0)
+    filter(!is.na(Emigration_date))
 
-  analysis_set <- temp %>%
+  # ==================================================
+  # 6. PREPARE CASES AND FOLLOW-UP
+  # ==================================================
+
+  # Assumes INDATUM is the date of first diagnosis.
+  # The original date must be checked against alder.
+
+  cases <- disease_data %>%
     mutate(
-      Died = if_else(ev_Death == "YES", 1L, 0L),
+      Diagnosis_date = as.Date(
+        as.character(INDATUM),
+        format = "%Y%m%d"
+      )
+    ) %>%
+    filter(
+      !is.na(Diagnosis_date),
+      !is.na(B_Year),
+      alder >= index_age,
+      alder < tau,
+      Diagnosis_date < admin_end
+    ) %>%
+    select(
+      lopnr,
+      alder,
+      B_Year,
+      Kon,
+      Diagnosis_year,
+      Diagnosis_date
+    ) %>%
+    left_join(
+      CDR,
+      by = "lopnr"
+    )
 
-      Death_age = if_else(
-        ev_Death == "YES",
-        year(Death_dt) - B_Year +
-          year(imig_Dates > B_Year),
-        alder + Time_Death / 365.25
+  # Select first emigration occurring after diagnosis
+  migration_after_diagnosis <- migration_data %>%
+    inner_join(
+      cases %>%
+        select(lopnr, Diagnosis_date),
+      by = "lopnr"
+    ) %>%
+    filter(
+      Emigration_date >= Diagnosis_date
+    ) %>%
+    group_by(lopnr) %>%
+    summarise(
+      Emigration_date = min(Emigration_date),
+      .groups = "drop"
+    )
+
+  cases <- cases %>%
+    left_join(
+      migration_after_diagnosis,
+      by = "lopnr"
+    )
+
+  # Exclude individuals who died before diagnosis
+  cases <- cases %>%
+    filter(
+      is.na(Death_date) |
+        Death_date >= Diagnosis_date
+    )
+
+  # Administrative end and emigration censoring
+  cases <- cases %>%
+    mutate(
+      Censor_date = pmin(
+        coalesce(Emigration_date, admin_end),
+        admin_end
       ),
 
-      Death_age = pmin(Death_age, tau),
+      # Event occurs only if death precedes censoring
+      Died = as.integer(
+        !is.na(Death_date) &
+          Death_date <= Censor_date
+      ),
 
-      onset_age = as.numeric(alder)
+      End_date = if_else(
+        Died == 1L,
+        Death_date,
+        Censor_date
+      ),
+
+      Followup_years = as.numeric(
+        End_date - Diagnosis_date
+      ) / 365.25,
+
+      # Approximate attained age using recorded
+      # age at diagnosis plus elapsed time.
+      Death_age = pmin(
+        alder + Followup_years,
+        tau
+      )
     ) %>%
-    as.data.frame()
+    filter(
+      !is.na(Followup_years),
+      Followup_years > 0,
+      Death_age > alder
+    ) %>%
+    mutate(
+      # Death at or after tau is censored at tau
+      Died = if_else(
+        alder + Followup_years >= tau,
+        0L,
+        Died
+      )
+    )
 
-  # --------------------------------------------------
-  # 7. DEFINE EARLY/LATE ONSET GROUPS
-  # --------------------------------------------------
+  message(
+    "Cases included after follow-up preparation: ",
+    nrow(cases)
+  )
+
+  # ==================================================
+  # 7. CREATE EARLY- AND LATE-ONSET GROUPS
+  # ==================================================
 
   onset_data <- purrr::map_dfr(
     cutoffs,
     function(cutoff) {
 
-      analysis_set %>%
+      cases %>%
         mutate(
           Cutoff = cutoff,
+
           Onset_group = if_else(
-            onset_age < cutoff,
+            alder < cutoff,
             "Early",
             "Late"
           )
@@ -297,101 +328,229 @@ calculate_LYL_onset <- function(
     }
   )
 
-  # --------------------------------------------------
-  # 8. HELPER FUNCTION FOR ONE GROUP
-  # --------------------------------------------------
+  # ==================================================
+  # 8. HELPER: CALCULATE ONE GROUP
+  # ==================================================
 
   calculate_one_group <- function(
-      df,
       cutoff,
       onset_group,
       sex
   ) {
 
-    sub <- df %>%
+    message(
+      Disease,
+      " | Cutoff: ", cutoff,
+      " | ", onset_group,
+      " | ", sex
+    )
+
+    sub <- onset_data %>%
       filter(
         Cutoff == cutoff,
-        Onset_group == onset_group,
-        onset_age >= index_age,
-        onset_age < tau,
-        Death_age > onset_age
+        Onset_group == onset_group
       )
 
     if (sex == "Male") {
-      sub <- sub %>% filter(Kon == 1)
+      sub <- sub %>%
+        filter(Kon == 1)
     }
 
     if (sex == "Female") {
-      sub <- sub %>% filter(Kon == 2)
+      sub <- sub %>%
+        filter(Kon == 2)
     }
 
     N <- nrow(sub)
 
-    if (N < 10) {
-      return(data.frame(
+    empty_result <- function() {
+      data.frame(
         Disease = Disease,
         Cutoff = cutoff,
         Onset_group = onset_group,
         Sex = sex,
         N = N,
-        LYL = NA_real_,
-        CI_lower = NA_real_,
-        CI_upper = NA_real_,
+        Deaths = sum(sub$Died, na.rm = TRUE),
+        Patient_LYL = NA_real_,
+        Patient_CI_lower = NA_real_,
+        Patient_CI_upper = NA_real_,
         Reference_LYL = NA_real_,
-        Excess_LYL = NA_real_
-      ))
+        Excess_LYL = NA_real_,
+        Excess_CI_lower = NA_real_,
+        Excess_CI_upper = NA_real_
+      )
     }
 
-    # Calculate remaining life-years using the
-    # same lill method as the original analysis.
+    if (N < 10) {
+      warning(
+        "Too few cases: ",
+        Disease, " ", cutoff, " ",
+        onset_group, " ", sex
+      )
+      return(empty_result())
+    }
 
-    fit <- lill::lyl_ci(
-      lyl_range(
-        data = sub,
-        t0 = alder,
-        t = Death_age,
-        status = Died,
-        age_begin = index_age,
-        age_end = 94,
-        tau = tau
-      ),
-      niter = Niter
-    )
+    # ================================================
+    # 8A. MATCH LIFE TABLES TO CASES
+    # ================================================
 
-    s <- summary(fit)
-
-    # ------------------------------------------------
-    # REFERENCE LIFE EXPECTANCY FOR THIS ONSET GROUP
-    # ------------------------------------------------
-
-    age_weights <- sub %>%
-      count(Kon, alder, name = "n") %>%
-      mutate(weight = n / sum(n))
-
-    # Adjust gender coding if life-table Gender is
-    # stored as character labels instead of 1/2.
-
-    reference <- age_weights %>%
+    reference <- sub %>%
+      transmute(
+        lopnr,
+        age = as.numeric(alder),
+        Gender = as.integer(Kon),
+        Year = as.integer(Diagnosis_year)
+      ) %>%
       left_join(
-        Control_life_exp,
+        Lifetables_long,
         by = c(
-          "Kon" = "Gender",
-          "alder" = "age"
-        )
+          "age",
+          "Gender",
+          "Year"
+        ),
+        relationship = "many-to-one"
       )
 
-    reference_lyl <- weighted.mean(
-      reference$LYL,
-      reference$weight,
-      na.rm = TRUE
+    if (nrow(reference) != N) {
+      stop(
+        "Reference matching changed the number ",
+        "of cases for ", Disease, " ", cutoff,
+        " ", onset_group, " ", sex
+      )
+    }
+
+    missing_reference <- sum(
+      is.na(reference$Life_exp)
     )
 
-    # The original code calculates:
-    # reference life-years - estimated life-years
+    if (missing_reference > 0) {
+      warning(
+        missing_reference,
+        " missing reference values for ",
+        Disease, " | ", cutoff,
+        " | ", onset_group,
+        " | ", sex
+      )
 
-    estimate <- s$lyl_estimate.TotalLYL
-    lower <- s$lyl_ci_left.TotalLYL
-    upper <- s$lyl_ci_right.TotalLYL
+      return(empty_result())
+    }
+
+    # ================================================
+    # 8B. REFERENCE LIFE-YEARS LOST
+    # ================================================
+
+    reference <- reference %>%
+      mutate(
+        Reference_LYL =
+          tau - age - Life_exp
+      )
+
+    reference_lyl <- mean(
+      reference$Reference_LYL
+    )
+
+    # ================================================
+    # 8C. PATIENT LIFE-YEARS LOST
+    # ================================================
+
+    fit <- tryCatch(
+
+      lill::lyl_ci(
+        lill::lyl_range(
+          data = sub,
+          t0 = alder,
+          t = Death_age,
+          status = Died,
+          age_begin = index_age,
+          age_end = tau - 1,
+          tau = tau
+        ),
+        niter = Niter
+      ),
+
+      error = function(e) {
+        warning(
+          "LYL estimation failed: ",
+          conditionMessage(e)
+        )
+        NULL
+      }
+    )
+
+    if (is.null(fit)) {
+      return(empty_result())
+    }
+
+    s <- tryCatch(
+      summary(fit),
+      error = function(e) {
+        warning(
+          "LYL summary failed: ",
+          conditionMessage(e)
+        )
+        NULL
+      }
+    )
+
+    if (is.null(s)) {
+      return(empty_result())
+    }
+
+    required_fields <- c(
+      "lyl_estimate.TotalLYL",
+      "lyl_ci_left.TotalLYL",
+      "lyl_ci_right.TotalLYL"
+    )
+
+    if (!all(required_fields %in% names(s))) {
+      warning(
+        "Unexpected lill summary structure. ",
+        "Inspect names(summary(fit))."
+      )
+      return(empty_result())
+    }
+
+    estimate <- as.numeric(
+      s$lyl_estimate.TotalLYL
+    )
+
+    lower <- as.numeric(
+      s$lyl_ci_left.TotalLYL
+    )
+
+    upper <- as.numeric(
+      s$lyl_ci_right.TotalLYL
+    )
+
+    if (
+      length(estimate) != 1 ||
+      length(lower) != 1 ||
+      length(upper) != 1 ||
+      any(!is.finite(c(estimate, lower, upper)))
+    ) {
+      warning(
+        "Invalid LYL estimate or CI for ",
+        Disease, " ", cutoff, " ",
+        onset_group, " ", sex
+      )
+      return(empty_result())
+    }
+
+    # ================================================
+    # 8D. EXCESS LIFE-YEARS LOST
+    # ================================================
+
+    excess_lyl <- estimate - reference_lyl
+
+    # Conditional CI: treats the reference as fixed.
+    # This is not a full bootstrap CI for excess LYL.
+
+    excess_lower <- lower - reference_lyl
+    excess_upper <- upper - reference_lyl
+
+    # ================================================
+    # 8E. RETURN RESULTS
+    # ================================================
 
     data.frame(
       Disease = Disease,
@@ -399,23 +558,37 @@ calculate_LYL_onset <- function(
       Onset_group = onset_group,
       Sex = sex,
       N = N,
-      LYL = estimate,
-      CI_lower = lower,
-      CI_upper = upper,
+      Deaths = sum(sub$Died, na.rm = TRUE),
+
+      Patient_LYL = estimate,
+      Patient_CI_lower = lower,
+      Patient_CI_upper = upper,
+
       Reference_LYL = reference_lyl,
-      Excess_LYL = reference_lyl - estimate
+
+      Excess_LYL = excess_lyl,
+      Excess_CI_lower = excess_lower,
+      Excess_CI_upper = excess_upper
     )
   }
 
-  # --------------------------------------------------
+  # ==================================================
   # 9. RUN ALL ANALYSES
-  # --------------------------------------------------
+  # ==================================================
 
-  sexes <- c()
+  sexes <- character()
 
-  if (DO_OVERALL) sexes <- c(sexes, "Overall")
-  if (DO_MALE) sexes <- c(sexes, "Male")
-  if (DO_FEMALE) sexes <- c(sexes, "Female")
+  if (DO_OVERALL) {
+    sexes <- c(sexes, "Overall")
+  }
+
+  if (DO_MALE) {
+    sexes <- c(sexes, "Male")
+  }
+
+  if (DO_FEMALE) {
+    sexes <- c(sexes, "Female")
+  }
 
   results <- tidyr::expand_grid(
     Cutoff = cutoffs,
@@ -424,30 +597,20 @@ calculate_LYL_onset <- function(
   ) %>%
     mutate(
       result = purrr::pmap(
-        list(Cutoff, Onset_group, Sex),
-        function(Cutoff, Onset_group, Sex) {
-
-          message(
-            Disease, " | Cutoff: ", Cutoff,
-            " | ", Onset_group,
-            " | ", Sex
-          )
-
-          calculate_one_group(
-            df = onset_data,
-            cutoff = Cutoff,
-            onset_group = Onset_group,
-            sex = Sex
-          )
-        }
+        list(
+          Cutoff,
+          Onset_group,
+          Sex
+        ),
+        calculate_one_group
       )
     ) %>%
     select(result) %>%
     unnest(result)
 
-  # --------------------------------------------------
+  # ==================================================
   # 10. SAVE RESULTS
-  # --------------------------------------------------
+  # ==================================================
 
   dir.create(
     output_dir,
@@ -459,33 +622,24 @@ calculate_LYL_onset <- function(
     output_dir,
     paste0(
       Disease,
-      "_early_late_onset_LYL.csv"
+      "_early_late_onset_matched_reference.csv"
     )
   )
 
-  readr::write_csv(results, output_file)
+  readr::write_csv(
+    results,
+    output_file
+  )
 
-  message("Results saved to: ", output_file)
+  message(
+    "Analysis completed: ",
+    Disease
+  )
+
+  message(
+    "Results saved to: ",
+    output_file
+  )
 
   return(results)
 }
-HF_results <- calculate_LYL_onset(
-  Disease = "HF",
-  Niter = 1000
-)
-
-IHD_results <- calculate_LYL_onset(
-  Disease = "IHD",
-  Niter = 1000
-)
-
-VTE_results <- calculate_LYL_onset(
-  Disease = "VTE",
-  Niter = 1000
-)
-
-all_results <- bind_rows(
-  HF_results,
-  IHD_results,
-  VTE_results
-)
