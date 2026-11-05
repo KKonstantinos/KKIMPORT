@@ -166,3 +166,47 @@ CREATE_DATA_FOR_PLOT_FIG <- function(dataset = SwedeHF_COHORT_ICD_dcm,
   ci_df$Grouping <- NAME
   return(ci_df)
 }
+
+
+
+    CREATE_DATA_FOR_PLOT_do_place <- function(dataset = SwedeHF_COHORT_ICD_dcm,
+                                          NAME = "DCM",
+                                          conf_level = 0.95) {
+
+  z <- qnorm(1 - (1 - conf_level) / 2)
+
+  # cuminc names ("1 1", "1 2", ...) -> labels
+  place_labels <- c("1" = "Hospital",
+                    "2" = "Nursing home",
+                    "3" = "Private residence",
+                    "4" = "Other/Unknown")
+
+  # helper: one cuminc curve -> data frame with log(-log) CI
+  curve_to_df <- function(curve, event_name) {
+    est <- curve$est
+    se  <- sqrt(curve$var)
+    inside <- est > 0 & est < 1
+    lower <- upper <- est
+    lower[inside] <- est[inside]^exp( z * se[inside] / (est[inside] * log(est[inside])))
+    upper[inside] <- est[inside]^exp(-z * se[inside] / (est[inside] * log(est[inside])))
+    data.frame(time = curve$time, est = est, lower = lower, upper = upper,
+               event = event_name)
+  }
+
+  ci  <- with(dataset, cuminc(ev_alldeathsyr, ev_placedo))
+  nms <- setdiff(names(ci), "Tests")
+
+  ci_df <- bind_rows(
+    lapply(nms, function(nm) {
+      code <- sub(".* ", "", nm)               # "1 3" -> "3"
+      if (!code %in% names(place_labels)) return(NULL)   # drops censoring
+      curve_to_df(ci[[nm]], place_labels[[code]])
+    })
+  )
+
+  ci_df$event <- factor(ci_df$event, levels = unname(place_labels))
+  ci_df <- droplevels(ci_df)                   # remove places that don't occur
+
+  ci_df$Grouping <- NAME
+  return(ci_df)
+}
