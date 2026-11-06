@@ -61,3 +61,48 @@ tab <- bind_rows(lapply(cutoffs, function(a) {
   select(`Age at onset`, Sex = SEX, N, Disease1, Disease2)
 
 tab
+
+
+library(dplyr)
+library(gt)
+
+cutoffs       <- c(45, 55, 65)
+timing_levels <- c("Prior to index",
+                   "Same time as index",
+                   "Within 1 year after index")
+diseases      <- c("disease1", "disease2")
+
+# counts for one group: Total + one count per timing category, per disease
+summ <- function(d) {
+  out <- tibble(N = nrow(d))
+  for (dis in diseases) {
+    flag <- d[[dis]] == 1
+    tim  <- d[[paste0(dis, "_timing")]]
+    out[[paste0(dis, "_Total")]] <- sum(flag, na.rm = TRUE)
+    for (t in timing_levels) {
+      out[[paste0(dis, "_", t)]] <- sum(flag & tim == t, na.rm = TRUE)
+    }
+  }
+  out
+}
+
+tab <- bind_rows(lapply(cutoffs, function(a) {
+  d <- df %>% filter(AGE <= a)
+  bind_rows(d, d %>% mutate(SEX = "Overall")) %>%
+    group_by(SEX) %>%
+    group_modify(~ summ(.x)) %>%
+    ungroup() %>%
+    mutate(cutoff = a)
+})) %>%
+  mutate(SEX = factor(SEX, levels = c("M", "F", "Overall"),
+                      labels = c("Male", "Female", "Overall"))) %>%
+  arrange(cutoff, SEX) %>%
+  mutate(
+    `Age at onset` = paste0("<= ", cutoff, " years"),
+    across(starts_with("disease"), ~ sprintf("%d (%.1f%%)", .x, 100 * .x / N))
+  ) %>%
+  select(`Age at onset`, Sex = SEX, N, starts_with("disease"))
+
+tab
+
+
