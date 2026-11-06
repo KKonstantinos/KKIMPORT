@@ -32,4 +32,32 @@ result <- bind_rows(lapply(cutoffs, function(a) {
     )
 }))
 
-result
+###
+library(dplyr)
+
+cutoffs <- c(45, 55, 65)
+
+tab <- bind_rows(lapply(cutoffs, function(a) {
+  d <- df %>% filter(AGE <= a)
+
+  bind_rows(d, d %>% mutate(SEX = "Overall")) %>%   # add an overall copy
+    group_by(SEX) %>%
+    summarise(
+      N    = n(),
+      d1_n = sum(disease1 == 1, na.rm = TRUE),
+      d2_n = sum(disease2 == 1, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(cutoff = a)
+})) %>%
+  mutate(SEX = factor(SEX, levels = c("M", "F", "Overall"),
+                      labels = c("Male", "Female", "Overall"))) %>%
+  arrange(cutoff, SEX) %>%
+  mutate(
+    `Age at onset` = paste0("<= ", cutoff, " years"),
+    Disease1 = sprintf("%d (%.1f%%)", d1_n, 100 * d1_n / N),
+    Disease2 = sprintf("%d (%.1f%%)", d2_n, 100 * d2_n / N)
+  ) %>%
+  select(`Age at onset`, Sex = SEX, N, Disease1, Disease2)
+
+tab
