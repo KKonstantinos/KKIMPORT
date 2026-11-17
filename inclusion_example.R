@@ -3,7 +3,8 @@
 # Returns one row per step:
 #   All      - all unique ids in the data
 #   FAS      - unique ids with the FAS flag
-#   excl...  - every column whose name starts with "excl", in column order,
+#   excl...  - every column whose name starts with "excl", in the order given
+#              in `descriptions` (unlisted ones last, in column order),
 #              applied one after another to what remains of the FAS population
 #
 # Columns in the result:
@@ -33,7 +34,20 @@ flow_counts <- function(data, id = "LopNr", fas = "FAS", prefix = "^excl",
 
   all_ids   <- unique(stats::na.omit(data[[id]]))
   fas_ids   <- ids_where(flag(data[[fas]]))
-  excl_vars <- grep(prefix, names(data), value = TRUE)  # keeps column order
+  excl_vars <- grep(prefix, names(data), value = TRUE)  # column order
+
+  # Order of exclusions: as listed in `descriptions`, then any unlisted
+  # excl columns in column order
+  if (!is.null(descriptions)) {
+    listed  <- grep(prefix, names(descriptions), value = TRUE)
+    missing <- setdiff(listed, names(data))
+    if (length(missing) > 0)
+      stop("Not found in data: ", paste(missing, collapse = ", "))
+    unlisted <- setdiff(excl_vars, listed)
+    if (length(unlisted) > 0)
+      warning("Not in descriptions, applied last: ", paste(unlisted, collapse = ", "))
+    excl_vars <- c(listed, unlisted)
+  }
 
   out <- data.frame(
     step        = c(0L, 1L),
