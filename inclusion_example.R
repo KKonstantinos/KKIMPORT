@@ -85,3 +85,98 @@ flow_counts <- function(data, id = "LopNr", fas = "FAS", prefix = "^excl",
 #   excl1 = "Age < 18 at index",
 #   excl2 = "Prior heart transplant"
 # ))
+
+
+
+
+
+flow_counts <- function(data, id = "LopNr", fas = "FAS", prefix = "^excl",
+                        descriptions = NULL) {
+  flag <- function(x) x %in% 1                          # NA -> FALSE, TRUE == 1
+  ids  <- trimws(as.character(data[[id]]))              # plain character IDs
+  ids[ids == ""] <- NA
+  ids_where <- function(rows) unique(stats::na.omit(ids[rows]))
+
+  describe <- function(v) {
+    if (!is.null(descriptions) && !is.na(descriptions[v])) return(unname(descriptions[v]))
+    lab <- attr(data[[v]], "label", exact = TRUE)
+    if (!is.null(lab) && nzchar(lab)) return(as.character(lab))
+    v
+  }
+
+  all_ids   <- unique(stats::na.omit(ids))
+  excl_vars <- grep(prefix, names(data), value = TRUE)  # column order
+
+  # Order of exclusions: as listed in `descriptions`, then any unlisted
+  # excl columns in column order
+  if (!is.null(descriptions)) {
+    listed  <- grep(prefix, names(descriptions), value = TRUE)
+    missing <- setdiff(listed, names(data))
+    if (length(missing) > 0)
+      stop("Not found in data: ", paste(missing, collapse = ", "))
+    unlisted <- setdiff(excl_vars, listed)
+    if (length(unlisted) > 0)
+      warning("Not in descriptions, applied last: ", paste(unlisted, collapse = ", "))
+    excl_vars <- c(listed, unlisted)
+  }
+
+  # Start from ALL patients; exclusions are applied one after another
+  out <- data.frame(
+    step        = 0L,
+    variable    = id,
+    description = "Patients satisfying inclusion criteria",
+    n_flagged   = length(all_ids),
+    n_excluded  = 0L,
+    n_remaining = length(all_ids)
+  )
+
+  remaining <- all_ids
+  for (i in seq_along(excl_vars)) {
+    v         <- excl_vars[i]
+    flagged   <- ids_where(flag(data[[v]]))             # has the flag (any order)
+    excluded  <- intersect(remaining, flagged)          # still in cohort -> removed now
+    remaining <- setdiff(remaining, excluded)
+    out <- rbind(out, data.frame(
+      step        = i,
+      variable    = v,
+      description = describe(v),
+      n_flagged   = length(flagged),
+      n_excluded  = length(excluded),
+      n_remaining = length(remaining)
+    ))
+  }
+
+  # FAS is the end result, applied last; it should remove nobody if the
+  # excl variables fully explain who is outside the FAS
+  if (!is.null(fas)) {
+    fas_ids      <- ids_where(flag(data[[fas]]))
+    not_fas      <- setdiff(remaining, fas_ids)         # left after exclusions, not FAS
+    fas_but_excl <- setdiff(fas_ids, remaining)         # in FAS, yet excluded above
+    remaining    <- setdiff(remaining, not_fas)
+    out <- rbind(out, data.frame(
+      step        = length(excl_vars) + 1L,
+      variable    = fas,
+      description = describe(fas),
+      n_flagged   = length(fas_ids),
+      n_excluded  = length(not_fas),
+      n_remaining = length(remaining)
+    ))
+    if (length(not_fas) > 0)
+      warning(length(not_fas), " patient(s) not in ", fas,
+              " without any exclusion flag, e.g. ",
+              paste(head(not_fas, 5), collapse = ", "))
+    if (length(fas_but_excl) > 0)
+      warning(length(fas_but_excl), " patient(s) in ", fas,
+              " but flagged by an exclusion, e.g. ",
+              paste(head(fas_but_excl, 5), collapse = ", "))
+  }
+
+  # The flowchart must add up
+  n <- nrow(out)
+  stopifnot(
+    all(out$n_remaining[-n] - out$n_excluded[-1] == out$n_remaining[-1]),
+    sum(out$n_excluded) == length(all_ids) - out$n_remaining[n]
+  )
+  rownames(out) <- NULL
+  out
+}
